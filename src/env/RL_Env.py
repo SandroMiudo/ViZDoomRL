@@ -5,27 +5,39 @@ from time import sleep
 
 class RL_Env:
    
-   def __init__(self, cfg : str) -> None:
+   def __init__(self, cfg : str):
     self.game = game = vzd.DoomGame()
-    game.load_config(os.path.join(vzd.scenarios_path, "deadly_corridor.cfg")) # or any other scenario file
+    game.load_config(os.path.join(vzd.scenarios_path, cfg)) # or any other scenario file
     self.buttons_supported = game.get_available_buttons()
     game.init()
 
+   def count_buttons_supported(self):
+    return len(self.buttons_supported)
+   
+   def def_buttons(self):
+    return [(e.name, e.value) for e in self.buttons_supported]
+
    def get_game_state(self):
+    if self.game.is_episode_finished():
+        self.game.new_episode()
     return self.game.get_state()
    
    def get_episode_time(self):
     return self.game.get_episode_time()
    
    def perform_action(self, action):
-    assert len(action) >= 1 and len(action[0]) == len(self.buttons_supported) , f"Actions array have to match Buttons array! expected : \
-        {self.buttons_supported}, but received : {len(action[0])}" 
     if self.game.is_episode_finished():
         self.game.new_episode()
     return self.game.make_action(action) # return reward
    
    def get_env_shape(self):
-     return (self.game.get_screen_height(), self.game.get_screen_width(), self.get_screen_channels())
+    return (self.game.get_screen_height(), self.game.get_screen_width(), self.game.get_screen_channels())
+
+   def get_total_reward(self):
+    return self.game.get_total_reward()
+
+   def get_last_reward(self):
+    return self.game.get_last_reward()
 
    def close_env(self):
     self.game.close()
