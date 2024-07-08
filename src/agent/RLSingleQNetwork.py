@@ -7,18 +7,86 @@ import keras
 from keras import layers
 from keras import metrics
 from keras import optimizers
+from keras import losses
+from keras import callbacks
 import numpy as np
 from ..env import RL_Env
 import matplotlib.pyplot as plt
 from scipy.stats import uniform
 import time
 
+class DebugCallback(callbacks.Callback):
+    def on_epoch_end(self, epoch, logs):
+        hist_ :DebugHistory = logs["hist"]
+        debug_history = hist_.history_of(0, epoch, 'all')
+
+        if (epoch % 1000) == 0:
+            e = np.arange(1, epoch+1)
+            _, ax = plt.subplots(2, 1)
+            ax[0].set_xlabel("Q-values")
+            ax[1].set_xlabel("Loss")
+            ax[0].scatter(e, debug_history['q_value'])
+            ax[0].scatter(e, debug_history['q*_value'])
+            ax[1].plot(e, debug_history['loss'])
+            plt.show()
+    
+    def on_train_begin(self, logs=None):
+        tmp           = logs["a_ind"]
+        q_value_index = logs["exp_ind"]
+        print("Epsilon area entered ...")
+        print(f"Actual index : {tmp} -- Exploration index : {q_value_index}")
+
+class TrainCallback(callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        reward_metric = logs["metric"]
+        q_star_value  = logs["q*_value"]
+        q_value       = logs["q_value"]
+        loss          = logs["loss"]
+        if (epoch % 100) == 0:
+            print(f"Epoch:{epoch} -- Reward:{reward_metric.result()} -- Loss:{loss} "
+                f"-- Q-Val:{q_value} -- Q*-Val:{q_star_value}")
+
+class DebugHistory():
+    
+    def __init__(self, ) -> None:
+        self.global_loss           = []
+        self.global_q_values       = []
+        self.global_q_star_values  = []
+
+    def update_history(self, entry : tuple[int, int, int, int]):
+        self.global_q_values.append(entry[0])
+        self.global_q_star_values.append(entry[1])
+        self.global_loss.append(entry[2])
+
+    """
+    args : 'all', 'loss', 'q_value', 'q*_value'
+    """
+    def history_of(self, epoch_from, epoch_to, *args):
+        hist_ = 0
+        if ('all' and 'loss' and 'q_value' and 'q*_value') not in args:
+            return None
+        
+        if('all' in args):
+            hist_ = {'loss' : self.global_loss[epoch_from:epoch_to],
+                     'q_value' : self.global_q_values[epoch_from:epoch_to],
+                     'q*_value' : self.global_q_star_values[epoch_from:epoch_to]}
+        elif('loss' in args):
+            hist_ = self.global_loss[epoch_from:epoch_to]
+        elif('q_value' in args):
+            hist_ = self.global_q_values[epoch_from:epoch_to]
+        elif('q*_value' in args):       
+            hist_ = self.global_q_star_values[epoch_from:epoch_to]
+
+        return hist_
+
 class RLSingleQNetwork(keras.Model): 
 
-    def __init__(self, rl_environment, learning_rate):
+    def __init__(self, rl_environment, fixed_reduce_value=100):
         super().__init__()
         self.rl_environment = rl_environment
-        self.learning_rate = learning_rate
+        self.fixed_reduce_value = fixed_reduce_value
+        self.handling_callbacks = callbacks.CallbackList()
+        
         print("environment shape : ", self.rl_environment.get_env_shape())
         print("buttons supported : ", self.rl_environment.count_buttons_supported())
         print("buttons defined   : ", self.rl_environment.def_buttons())
@@ -34,7 +102,8 @@ class RLSingleQNetwork(keras.Model):
         self.pool_layer4   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
         self.conv_layer5   = layers.Conv2D(128, (3,3), activation="relu")
         self.pool_layer5   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
-        self.reshape_layer = layers.Reshape((70, 128))
+        self.conv_layer6   = layers.Conv2D(256, (3,3), activation="relu")
+        self.pool_layer6   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
         self.flatten_layer = layers.Flatten()
         self.dense_layer   = layers.Dense(self.rl_environment.count_buttons_supported())
 
@@ -49,34 +118,59 @@ class RLSingleQNetwork(keras.Model):
         x = self.pool_layer4(x)
         x = self.conv_layer5(x)
         x = self.pool_layer5(x)
+        x = self.conv_layer6(x)
+        x = self.pool_layer6(x)
         x = self.flatten_layer(x)
         x = self.dense_layer(x)
         return x
 
-    def train_step(self, game_state, seed, *args, delta=1, epsilon=0.005):
+    def reduce_over_time(self, epoch, epsilon, epsilon_update, epsilon_l_b, reduce_update):
+        limit_reached = False
+        if((epoch % reduce_update == 0) and (epsilon > epsilon_l_b)):
+            if(epsilon - epsilon_update < epsilon_l_b):
+                epsilon = epsilon_l_b
+                limit_reached = True
+            else: 
+                epsilon -= epsilon_update
+
+        return epsilon, limit_reached
+
+    def reduce_fixed(self, epoch, epsilon, epsilon_update, epsilon_l_b, reduce_update):
+        limit_reached = False
+        if((epoch < reduce_update and (epsilon > epsilon_l_b))):
+            epsilon, limit_reached = self.reduce_over_time(epoch,  epsilon, epsilon_update, epsilon_l_b, self.fixed_reduce_value)
+        else:
+            epsilon = epsilon_l_b
+            limit_reached = True
+        
+        return epsilon, limit_reached
+
+    def train_step(self, game_state, seed, delta, epsilon, *args):
         q_values = self(game_state)
         q_value_index = tf.argmax(q_values[0])
         rnd_uniform = uniform.rvs()
-        if(abs(rnd_uniform - seed) <= epsilon):
-            if(len(args) > 0 and args[0] == 'debug'):
-                print("epsilon area entered ...")
+        if(abs(rnd_uniform - seed) <= epsilon):    
             tmp = q_value_index
             q_value_index = tf.convert_to_tensor(time.time_ns() % self.rl_environment.count_buttons_supported())
-            if(len(args) > 0 and args[0] == "debug"):
-                print(f"Actual index : {tmp} -- Exploration index : {q_value_index}")
+            self.handling_callbacks.on_train_begin({"a_ind":tmp, "exp_ind":q_value_index})
         actions = tf.one_hot(q_value_index, depth=self.rl_environment.count_buttons_supported(), dtype=tf.int32)
         reward = self.rl_environment.perform_action(actions.numpy())
         updated_game_state = self.rl_environment.get_game_state()
         reshaped_screen_buffer = tf.convert_to_tensor(np.asarray(updated_game_state.screen_buffer) \
-            .astype(np.float32).reshape(240, 320, 3))
+            .astype(np.float32).reshape(self.rl_environment.get_env_shape()))
         reshaped_screen_buffer = tf.expand_dims(reshaped_screen_buffer, axis=0)
         q_star_values = self(reshaped_screen_buffer)
         q_star_value = tf.reduce_max(q_star_values[0])
 
         with tf.GradientTape() as gradient_tape:
-            q_values = self(game_state)  # Forward pass again to get the gradients
-            q_value = tf.reduce_max(q_values[0])
+            q_values = self(game_state)
+            q_value = tf.constant(0.0)
+            if(abs(rnd_uniform - seed) <= epsilon):
+                q_value = q_values[0, (time.time_ns() % self.rl_environment.count_buttons_supported())]
+            else: 
+                q_value = tf.reduce_max(q_values[0])
             loss = self.compute_loss(q_value, q_star_value, reward, delta)
+            
         
         gradients = gradient_tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
@@ -93,53 +187,58 @@ class RLSingleQNetwork(keras.Model):
 
         return ((reward + delta * q_star_value) - q_value) ** 2
 
-    def fit(self, *args, epochs=500000):
-        l          = []
-        q_val      = []
-        q_star_val = []
-        e     = []
-        names = [b.name for b in self.rl_environment.buttons_supported]
-        count = np.zeros_like(names, dtype=np.int32)
+    def to_data_buffer(self, game_state):
+        a = np.asarray(game_state.screen_buffer) \
+            .astype(np.float32).reshape(self.rl_environment.get_env_shape())
+        return tf.expand_dims(a, axis=0)
+
+    def register_callback(self, callback: callbacks.Callback):
+        self.handling_callbacks.append(callback)
+
+    """
+    reduce_fctn : over_time or fixed
+    reduce_update : over_time -> update value , fixed -> fixed value to stop
+    """
+    def fit(self, *args, epochs=100000, delta=0.7, epsilon=0.1, epsilon_update=0.001, 
+            epsilon_l_b=0.0001, reduce_update=100, reduce_fctn="over_time"):
         rnd_seed = uniform.rvs()
+        reduce_function = None
+        limit_reached = False
+        history = None
+        if reduce_fctn == "over_time":
+            reduce_function = self.reduce_over_time
+        elif reduce_fctn == "fixed":
+            reduce_function = self.reduce_fixed
+
+        if "debug" in args:
+            self.register_callback(DebugCallback())
+            history = DebugHistory()
+
+        self.register_callback(TrainCallback())
+
         for epoch in range(epochs):
             game_state = self.rl_environment.get_game_state()
-            reshaped_screen_buffer = np.asarray(game_state.screen_buffer).astype(np.float32).reshape(240, 320, 3)
-            reshaped_screen_buffer = tf.expand_dims(reshaped_screen_buffer, axis=0)
+            reshaped_screen_buffer = self.to_data_buffer(game_state)
             reward, q_value, q_star_value, loss, action = self.train_step(
-                reshaped_screen_buffer, rnd_seed, *args)
+                reshaped_screen_buffer, rnd_seed, delta, epsilon, *args)
             self.metrics[0].update_state(reward)
-            if (args[0] == 'debug'):
-                count[action] += 1
-                q_val.append(q_value)
-                q_star_val.append(q_star_value)
-                l.append(loss)
-                e.append((epoch+1))
-                if (epoch % 10000) == 0:
-                    fig, ax = plt.subplots(2, 1)
-                    ax[0].set_xlabel("Q-values")
-                    ax[1].set_xlabel("Loss")
-                    ax[0].scatter(e, q_val)
-                    ax[0].scatter(e, q_star_val)
-                    ax[1].plot(e, l)
-                    plt.show()
-                elif (epoch % 1000) == 0:
-                    plt.title(f"Actions performed in epoch : {epoch}")       
-                    plt.bar(names, count)
-                    plt.show()
+            if(not limit_reached):
+                epsilon, limit_reached = reduce_function(epoch, epsilon, epsilon_update, 
+                    epsilon_l_b, reduce_update)
+            if(history != None):
+                history.update_history((q_value, q_star_value, loss))
                 
-            if (epoch % 100) == 0:
-                    print(f"Epoch:{epoch} -- Reward:{self.metrics[0].result()} -- Loss:{loss} "
-                        f"-- Q-Val:{q_value} -- Q*-Val:{q_star_value}")
-            
+            self.handling_callbacks.on_epoch_end(epoch+1, {"hist":history, "metric":self.metrics[0],
+                "loss":loss, "q*_value":q_star_value, "q_value":q_value})
         self.rl_environment.close_env()
         
     def evaluate(self, x=None, y=None, batch_size=None, verbose="auto", sample_weight=None, steps=None, callbacks=None, max_queue_size=10, workers=1, use_multiprocessing=False, return_dict=False, **kwargs):
         return super().evaluate(x, y, batch_size, verbose, sample_weight, steps, callbacks, max_queue_size, workers, use_multiprocessing, return_dict, **kwargs)
 
-rl_env = RL_Env.RL_Env("deadly_corridor.cfg")    
-model = RLSingleQNetwork(rl_env, 0.05)
-model.compile(optimizer=optimizers.Adam(learning_rate=0.0001), 
+rl_env = RL_Env.RL_Env("deadly_corridor.cfg", (320, 256))    
+model = RLSingleQNetwork(rl_env)
+model.compile(optimizer=optimizers.Adam(learning_rate=1e-7),
+              loss=losses.MeanSquaredError(),
               metrics=[metrics.Mean()])
-model.fit("debug")
-
+model.fit("debug", epsilon=0.08, reduce_update=1000)
 model.save("../model.keras")
