@@ -14,6 +14,8 @@ from ..env import RL_Env
 import matplotlib.pyplot as plt
 from scipy.stats import uniform
 import time
+import argparse
+import os
 
 class DebugCallback(callbacks.Callback):
     def on_epoch_end(self, epoch, logs):
@@ -185,7 +187,7 @@ class RLSingleQNetwork(keras.Model):
         # L(theta) = E(s,a,r,s*)~D^A[((r + delta * max Q(s*, a*; theta)) - Q(s, a, theta))^2 ] : batch training
         # L(theta) = ((r + delta * max Q(s*, a*; theta)) - Q(s, a; theta)^2 : single training
 
-        return ((reward + delta * q_star_value) - q_value) ** 2
+        return self.loss(tf.convert_to_tensor([q_value]), tf.convert_to_tensor([reward + delta * q_star_value]))
 
     def to_data_buffer(self, game_state):
         a = np.asarray(game_state.screen_buffer) \
@@ -235,10 +237,57 @@ class RLSingleQNetwork(keras.Model):
     def evaluate(self, x=None, y=None, batch_size=None, verbose="auto", sample_weight=None, steps=None, callbacks=None, max_queue_size=10, workers=1, use_multiprocessing=False, return_dict=False, **kwargs):
         return super().evaluate(x, y, batch_size, verbose, sample_weight, steps, callbacks, max_queue_size, workers, use_multiprocessing, return_dict, **kwargs)
 
-rl_env = RL_Env.RL_Env("deadly_corridor.cfg", (320, 256))    
-model = RLSingleQNetwork(rl_env)
-model.compile(optimizer=optimizers.Adam(learning_rate=1e-7),
+
+
+
+def train_model_routine(debug_act: bool, config : str, res : tuple[int, int],
+    dir : str, file: str):
+    rl_env = RL_Env.RL_Env(config, res)    
+    model = RLSingleQNetwork(rl_env)
+    model.compile(optimizer=optimizers.Adam(learning_rate=1e-5),
               loss=losses.MeanSquaredError(),
               metrics=[metrics.Mean()])
-model.fit("debug", epsilon=0.08, reduce_update=1000)
-model.save("../model.keras")
+    # fixed update over time
+    debug_str = ""
+    if(debug_act):
+        debug_str = "debug"
+    model.fit(debug_str, epsilon=0.08, reduce_update=1000, epsilon_update=0.0)
+    model_loc = os.path.join(dir, file)
+    model.save(model_loc)
+
+def load_model_routine():
+    pass
+
+def parse_arguments():
+    arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument("-l", "--load-weights", help='load trained weights', 
+        dest="load_weights", action='store_true')
+    arg_parser.add_argument("--version", action='version', version='1.0')
+    arg_parser.add_argument("-d", "--debug", help='prints debug messages while training',
+        dest="debug", action='store_true')
+    arg_parser.add_argument("configuration", help='name of configuration',
+        default="deadly_corridor.cfg", metavar='CNF', dest='config')
+    arg_parser.add_argument("-t", "--train", help='specifies if train should occur',
+        action='store_true', dest='trainable')
+    arg_parser.add_argument("-x", "--resX", default=320, help='resolution x (rows)',
+        dest="res", action='append', type=int)
+    arg_parser.add_argument("-y", "--resY", default=240, help='resolution y (cols)',
+        dest="res", action='append', type=int)
+    arg_parser.add_argument("--out-dir", default="..", help='specifiy output directory',
+        dest="dir")
+    arg_parser.add_argument("--out-file", default="model.keras", help='specifiy file name',
+        dest="file")
+    """arg_parser.add_argument("--epsilon", help="exploration radius : x -> 0 -- less exploration"
+                            "x -> 1 -- more exploration")
+    arg_parser.add_argument("--") """
+    name_space_obj = arg_parser.parse_args()
+    
+    var_dict = vars(name_space_obj)
+    if (var_dict["load_weigths"]):
+        load_model_routine()
+    elif(var_dict["trainable"]):    
+        train_model_routine(var_dict["debug"], var_dict["config"], tuple(var_dict["res"]),
+            var_dict["dir"], var_dict["file"])
+
+if __name__ == "__main__":
+   parse_arguments()
