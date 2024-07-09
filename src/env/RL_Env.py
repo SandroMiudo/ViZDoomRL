@@ -5,9 +5,16 @@ from time import sleep
 
 class RL_Env:
    
-   def __init__(self, cfg : str):
+   def __init__(self, cfg : str, res : tuple[int, int]=(320, 240)):
     self.game = game = vzd.DoomGame()
     game.load_config(os.path.join(vzd.scenarios_path, cfg)) # or any other scenario file
+    if(res[0] == 320 and res[1] == 256):
+      game.set_screen_resolution(vzd.ScreenResolution.RES_320X256)
+    elif(res[0] == 400 and res[1] == 300):
+      game.set_screen_resolution(vzd.ScreenResolution.RES_400X300)
+    elif(res[0] != 320 and res[1] != 240):
+      raise Exception("resolution not supported ...")
+
     self.buttons_supported = game.get_available_buttons()
     game.init()
 
