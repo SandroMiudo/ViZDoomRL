@@ -237,21 +237,19 @@ class RLSingleQNetwork(keras.Model):
     def evaluate(self, x=None, y=None, batch_size=None, verbose="auto", sample_weight=None, steps=None, callbacks=None, max_queue_size=10, workers=1, use_multiprocessing=False, return_dict=False, **kwargs):
         return super().evaluate(x, y, batch_size, verbose, sample_weight, steps, callbacks, max_queue_size, workers, use_multiprocessing, return_dict, **kwargs)
 
-
-
-
 def train_model_routine(debug_act: bool, config : str, res : tuple[int, int],
-    dir : str, file: str):
+    dir : str, file: str, epochs, delta, eps, eps_update, eps_lb, learning):
     rl_env = RL_Env.RL_Env(config, res)    
     model = RLSingleQNetwork(rl_env)
-    model.compile(optimizer=optimizers.Adam(learning_rate=1e-5),
+    model.compile(optimizer=optimizers.Adam(learning_rate=learning),
               loss=losses.MeanSquaredError(),
               metrics=[metrics.Mean()])
     # fixed update over time
     debug_str = ""
     if(debug_act):
         debug_str = "debug"
-    model.fit(debug_str, epsilon=0.08, reduce_update=1000, epsilon_update=0.0)
+    model.fit(debug_str, epochs=epochs, delta=delta, epsilon=eps, epsilon_update=eps_update,
+        epsilon_l_b=eps_lb)
     model_loc = os.path.join(dir, file)
     model.save(model_loc)
 
@@ -265,29 +263,36 @@ def parse_arguments():
     arg_parser.add_argument("--version", action='version', version='1.0')
     arg_parser.add_argument("-d", "--debug", help='prints debug messages while training',
         dest="debug", action='store_true')
-    arg_parser.add_argument("configuration", help='name of configuration',
-        default="deadly_corridor.cfg", metavar='CNF', dest='config')
+    arg_parser.add_argument("--configuration", help='name of configuration',
+        default="deadly_corridor.cfg", metavar='CNF')
     arg_parser.add_argument("-t", "--train", help='specifies if train should occur',
         action='store_true', dest='trainable')
-    arg_parser.add_argument("-x", "--resX", default=320, help='resolution x (rows)',
+    arg_parser.add_argument("-x", "--resX", help='resolution x (rows)',
         dest="res", action='append', type=int)
-    arg_parser.add_argument("-y", "--resY", default=240, help='resolution y (cols)',
+    arg_parser.add_argument("-y", "--resY", help='resolution y (cols)',
         dest="res", action='append', type=int)
     arg_parser.add_argument("--out-dir", default="..", help='specifiy output directory',
         dest="dir")
     arg_parser.add_argument("--out-file", default="model.keras", help='specifiy file name',
         dest="file")
-    """arg_parser.add_argument("--epsilon", help="exploration radius : x -> 0 -- less exploration"
-                            "x -> 1 -- more exploration")
-    arg_parser.add_argument("--") """
+    arg_parser.add_argument("--epsilon", help="exploration radius : x -> 0 -- less exploration"
+                            "x -> 1 -- more exploration", dest="eps", type=float, default=0.08)
+    arg_parser.add_argument("--epsilon-update", dest="eps_update", type=float, default=0.001)
+    arg_parser.add_argument("--epsilon-lb", dest="eps_lb", type=float, default=0.0001)
+    arg_parser.add_argument("--delta", dest="delta", type=float, default=0.5)
+    arg_parser.add_argument("--epochs", dest="epochs", type=int, default=100000)
+    arg_parser.add_argument("--learning", dest="learning", type=float, default=1e-5)
     name_space_obj = arg_parser.parse_args()
     
     var_dict = vars(name_space_obj)
-    if (var_dict["load_weigths"]):
+    
+    if (var_dict["load_weights"]):
         load_model_routine()
     elif(var_dict["trainable"]):    
-        train_model_routine(var_dict["debug"], var_dict["config"], tuple(var_dict["res"]),
-            var_dict["dir"], var_dict["file"])
+        train_model_routine(var_dict["debug"], var_dict["configuration"], tuple(var_dict["res"]),
+            var_dict["dir"], var_dict["file"], var_dict["epochs"],
+            var_dict["delta"], var_dict["eps"], var_dict["eps_update"],
+            var_dict["eps_lb"], var_dict["learning"])
 
 if __name__ == "__main__":
    parse_arguments()
