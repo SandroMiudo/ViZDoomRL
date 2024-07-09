@@ -12,7 +12,7 @@ class RL_Env:
       game.set_screen_resolution(vzd.ScreenResolution.RES_320X256)
     elif(res[0] == 400 and res[1] == 300):
       game.set_screen_resolution(vzd.ScreenResolution.RES_400X300)
-    elif(res[0] != 320 or res[1] != 240):
+    elif(res[0] != 320 and res[1] != 240):
       raise Exception("resolution not supported ...")
 
     self.buttons_supported = game.get_available_buttons()
