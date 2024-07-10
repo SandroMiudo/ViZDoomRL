@@ -18,11 +18,16 @@ import argparse
 import os
 
 class DebugCallback(callbacks.Callback):
+
+    def __init__(self, debug_in_epochs=1000):
+        super().__init__()
+        self.debug_in_epochs = debug_in_epochs
+
     def on_epoch_end(self, epoch, logs):
-        hist_ :DebugHistory = logs["hist"]
+        hist_ :History = logs["hist"]
         debug_history = hist_.history_of(0, epoch, 'all')
 
-        if (epoch % 1000) == 0:
+        if (epoch % self.debug_in_epochs) == 0:
             e = np.arange(1, epoch+1)
             _, ax = plt.subplots(2, 1)
             ax[0].set_xlabel("Q-values")
@@ -39,16 +44,45 @@ class DebugCallback(callbacks.Callback):
         print(f"Actual index : {tmp} -- Exploration index : {q_value_index}")
 
 class TrainCallback(callbacks.Callback):
+
+    def __init__(self, log_training_in_epochs=50, log_debug_training_in_epochs=100):
+        super().__init__()
+        self.log_training_in_epochs = log_training_in_epochs
+        self.log_debug_training_in_epochs = log_debug_training_in_epochs
+
     def on_epoch_end(self, epoch, logs=None):
         reward_metric = logs["metric"]
         q_star_value  = logs["q*_value"]
         q_value       = logs["q_value"]
         loss          = logs["loss"]
-        if (epoch % 100) == 0:
-            print(f"Epoch:{epoch} -- Reward:{reward_metric.result()} -- Loss:{loss} "
+        hist_         = logs["hist"]
+        if (epoch % self.log_debug_training_in_epochs) == 0:
+            print(f"Sample --> Epoch:{epoch} -- Loss:{loss} "
                 f"-- Q-Val:{q_value} -- Q*-Val:{q_star_value}")
+            self.log_dbg_training(hist_, epoch, self.log_debug_training_in_epochs, 
+                reward_metric)
 
-class DebugHistory():
+        if (epoch % self.log_training_in_epochs) == 0:
+            self.log_training(epoch, q_star_value, q_value, loss)
+            
+    def log_training(self, epoch, q_star_value, q_value, loss):   
+        with open(os.path.join(os.getcwd(), "logs", "run.log"), 'a') as file:
+            file.write(f"Logging for epoch {epoch} ...\n")
+            file.write(f"Q-Value = {q_value} , Target Q-Value = {q_star_value} , Loss = {loss}\n")
+
+    def log_dbg_training(self, _hist, epoch, minus_epoch, reward_metric):
+        history = _hist.history_of(epoch-minus_epoch, epoch, 'all')
+        mean_loss = np.mean(history["loss"])
+        mean_q_value = np.mean(history["q_value"])
+        mean_q_target_value = np.mean(history["q*_value"])
+        with open(os.path.join(os.getcwd(), "logs", "dbg.log"), 'a') as file:
+            file.write(f"Logging mean values from epoch {epoch-minus_epoch} to epoch {epoch}\n")
+            file.write(f"Mean Loss     = {mean_loss}\n")
+            file.write(f"Mean Q-Value  = {mean_q_value}\n")
+            file.write(f"Mean Q-Target = {mean_q_target_value}\n")
+            file.write(f"Mean Reward   = {reward_metric.result()}\n")
+        
+class History():
     
     def __init__(self, ) -> None:
         self.global_loss           = []
@@ -65,7 +99,9 @@ class DebugHistory():
     """
     def history_of(self, epoch_from, epoch_to, *args):
         hist_ = 0
-        if ('all' and 'loss' and 'q_value' and 'q*_value') not in args:
+        if ('all' not in args) and ('loss' not in args) and ('q_value' not in args) and \
+            ('q*_value' not in args):
+            print(args)
             return None
         
         if('all' in args):
@@ -92,22 +128,23 @@ class RLSingleQNetwork(keras.Model):
         print("environment shape : ", self.rl_environment.get_env_shape())
         print("buttons supported : ", self.rl_environment.count_buttons_supported())
         print("buttons defined   : ", self.rl_environment.def_buttons())
-        # (240, 320, 3)
-        self.conv_layer1   = layers.Conv2D(filters=8, kernel_size=(3,3), activation="relu", \
-            input_shape=self.rl_environment.get_env_shape())
-        self.pool_layer1   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
-        self.conv_layer2   = layers.Conv2D(16, (3,3), activation="relu")
-        self.pool_layer2   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
-        self.conv_layer3   = layers.Conv2D(32, (3,3), activation="relu")
-        self.pool_layer3   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
-        self.conv_layer4   = layers.Conv2D(64, (3,3), activation="relu")
-        self.pool_layer4   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
-        self.conv_layer5   = layers.Conv2D(128, (3,3), activation="relu")
+        self.conv_layer1   = layers.Conv2D(filters=16, kernel_size=(4,4), activation="relu", \
+            strides=(2,2), padding='same', input_shape=self.rl_environment.get_env_shape(), use_bias=False)
+        self.pool_layer1   = layers.MaxPooling2D(pool_size=(2,2), padding='same')
+        self.conv_layer2   = layers.Conv2D(32, (4,4), (2,2), activation="relu", use_bias=False, padding='same')
+        self.pool_layer2   = layers.MaxPooling2D(pool_size=(2,2), padding='same')
+        self.conv_layer3   = layers.Conv2D(64, (3,3), (2,2), activation="relu", use_bias=False, padding='same')
+        self.pool_layer3   = layers.MaxPooling2D(pool_size=(2,2), padding='same')
+        self.conv_layer4   = layers.Conv2D(128, (2,2), activation="relu", use_bias=False, padding='same')
+        self.pool_layer4   = layers.MaxPooling2D(pool_size=(2,2), padding='same')
+        """self.conv_layer5   = layers.Conv2D(128, (2,2), activation="relu") 
         self.pool_layer5   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
         self.conv_layer6   = layers.Conv2D(256, (3,3), activation="relu")
-        self.pool_layer6   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
-        self.flatten_layer = layers.Flatten()
-        self.dense_layer   = layers.Dense(self.rl_environment.count_buttons_supported())
+        self.pool_layer6   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2)) """
+        self.flatten_layer  = layers.Flatten()
+        self.dense_layer1   = layers.Dense(64)
+        self.leaky_relu     = layers.LeakyReLU()
+        self.dense_layer2   = layers.Dense(self.rl_environment.count_buttons_supported())
 
     def call(self, game_state):
         x = self.conv_layer1(game_state)
@@ -118,12 +155,14 @@ class RLSingleQNetwork(keras.Model):
         x = self.pool_layer3(x)
         x = self.conv_layer4(x)
         x = self.pool_layer4(x)
-        x = self.conv_layer5(x)
+        """x = self.conv_layer5(x)
         x = self.pool_layer5(x)
         x = self.conv_layer6(x)
-        x = self.pool_layer6(x)
+        x = self.pool_layer6(x) """
         x = self.flatten_layer(x)
-        x = self.dense_layer(x)
+        x = self.dense_layer1(x)
+        x = self.leaky_relu(x)
+        x = self.dense_layer2(x)
         return x
 
     def reduce_over_time(self, epoch, epsilon, epsilon_update, epsilon_l_b, reduce_update):
@@ -160,6 +199,7 @@ class RLSingleQNetwork(keras.Model):
         updated_game_state = self.rl_environment.get_game_state()
         reshaped_screen_buffer = tf.convert_to_tensor(np.asarray(updated_game_state.screen_buffer) \
             .astype(np.float32).reshape(self.rl_environment.get_env_shape()))
+        reshaped_screen_buffer = (reshaped_screen_buffer - 127.5) / 127.5 # [-1 , 1]
         reshaped_screen_buffer = tf.expand_dims(reshaped_screen_buffer, axis=0)
         q_star_values = self(reshaped_screen_buffer)
         q_star_value = tf.reduce_max(q_star_values[0])
@@ -187,7 +227,7 @@ class RLSingleQNetwork(keras.Model):
         # L(theta) = E(s,a,r,s*)~D^A[((r + delta * max Q(s*, a*; theta)) - Q(s, a, theta))^2 ] : batch training
         # L(theta) = ((r + delta * max Q(s*, a*; theta)) - Q(s, a; theta)^2 : single training
 
-        return self.loss(tf.convert_to_tensor([q_value]), tf.convert_to_tensor([reward + delta * q_star_value]))
+        return self.loss(tf.convert_to_tensor([reward + delta * q_star_value]), tf.convert_to_tensor([q_value]))
 
     def to_data_buffer(self, game_state):
         a = np.asarray(game_state.screen_buffer) \
@@ -201,12 +241,11 @@ class RLSingleQNetwork(keras.Model):
     reduce_fctn : over_time or fixed
     reduce_update : over_time -> update value , fixed -> fixed value to stop
     """
-    def fit(self, *args, epochs=100000, delta=0.7, epsilon=0.1, epsilon_update=0.001, 
+    def fit(self, *args, epochs=1, delta=0.95, epsilon=0.1, epsilon_update=0.001, 
             epsilon_l_b=0.0001, reduce_update=100, reduce_fctn="over_time"):
         rnd_seed = uniform.rvs()
         reduce_function = None
         limit_reached = False
-        history = None
         if reduce_fctn == "over_time":
             reduce_function = self.reduce_over_time
         elif reduce_fctn == "fixed":
@@ -214,9 +253,11 @@ class RLSingleQNetwork(keras.Model):
 
         if "debug" in args:
             self.register_callback(DebugCallback())
-            history = DebugHistory()
-
+            
+        history = History()
         self.register_callback(TrainCallback())
+        self.log_parameters_used(epochs, delta, epsilon, epsilon_update,
+            epsilon_l_b, reduce_update, reduce_function, 0)
 
         for epoch in range(epochs):
             game_state = self.rl_environment.get_game_state()
@@ -227,15 +268,47 @@ class RLSingleQNetwork(keras.Model):
             if(not limit_reached):
                 epsilon, limit_reached = reduce_function(epoch, epsilon, epsilon_update, 
                     epsilon_l_b, reduce_update)
-            if(history != None):
-                history.update_history((q_value, q_star_value, loss))
+            history.update_history((q_value, q_star_value, loss))
                 
             self.handling_callbacks.on_epoch_end(epoch+1, {"hist":history, "metric":self.metrics[0],
                 "loss":loss, "q*_value":q_star_value, "q_value":q_value})
         self.rl_environment.close_env()
-        
+
+    def log_parameters_used(self, epochs, delta, epsilon, epsilon_update,
+        epsilon_lower_bound, reduce_update, reduce_function, learning_rate):
+        _optimizer = str(self.optimizer)
+        _metric    = str(self.metrics[0])
+        _loss      = str(self.loss)
+
+        with open(os.path.join(os.getcwd(), "logs", "run.log"), 'a') as file:
+            file.write("Model components :\n")
+            file.write(f"Optimzer = {_optimizer}\n")
+            file.write(f"Metric   = {_metric}\n")
+            file.write(f"Loss     = {_loss}\n\n")
+            file.write("Model parameters : \n")
+            file.write(f"Epochs          = {epochs}\n")
+            file.write(f"Delta           = {delta}\n")
+            file.write(f"Epsilon         = {epsilon}\n")
+            file.write(f"Epsilon Update  = {epsilon_update}\n")
+            file.write(f"Epsilon Lower Bound = {epsilon_lower_bound}\n")
+            file.write(f"Reduce Update   = {reduce_update}\n")
+            file.write(f"Reduce Function = {str(reduce_function)}\n")
+            file.write(f"Learning Rate   = {learning_rate}\n\n")
+
     def evaluate(self, x=None, y=None, batch_size=None, verbose="auto", sample_weight=None, steps=None, callbacks=None, max_queue_size=10, workers=1, use_multiprocessing=False, return_dict=False, **kwargs):
         return super().evaluate(x, y, batch_size, verbose, sample_weight, steps, callbacks, max_queue_size, workers, use_multiprocessing, return_dict, **kwargs)
+
+def create_log():
+    if not os.path.exists(os.path.join(os.getcwd(), "logs", "run.log")):
+        with open(os.path.join(os.getcwd(), "logs", "run.log"), 'x') as _:
+            pass
+        with open(os.path.join(os.getcwd(), "logs", "dbg.log"), 'x') as _:
+            pass
+    else:
+        with open(os.path.join(os.getcwd(), "logs", "run.log"), 'w') as _:
+            pass
+        with open(os.path.join(os.getcwd(), "logs" , "dbg.log"), 'w') as _:
+            pass
 
 def train_model_routine(debug_act: bool, config : str, res : tuple[int, int],
     dir : str, file: str, epochs, delta, eps, eps_update, eps_lb, learning):
@@ -248,9 +321,11 @@ def train_model_routine(debug_act: bool, config : str, res : tuple[int, int],
     debug_str = ""
     if(debug_act):
         debug_str = "debug"
+    create_log()
     model.fit(debug_str, epochs=epochs, delta=delta, epsilon=eps, epsilon_update=eps_update,
         epsilon_l_b=eps_lb)
     model_loc = os.path.join(dir, file)
+    print("model weigths location : ", model_loc)
     model.save(model_loc)
 
 def load_model_routine():
@@ -271,7 +346,7 @@ def parse_arguments():
         dest="res", action='append', type=int)
     arg_parser.add_argument("-y", "--resY", help='resolution y (cols)',
         dest="res", action='append', type=int)
-    arg_parser.add_argument("--out-dir", default="..", help='specifiy output directory',
+    arg_parser.add_argument("--out-dir", default=".", help='specifiy output directory',
         dest="dir")
     arg_parser.add_argument("--out-file", default="model.keras", help='specifiy file name',
         dest="file")
@@ -279,7 +354,7 @@ def parse_arguments():
                             "x -> 1 -- more exploration", dest="eps", type=float, default=0.08)
     arg_parser.add_argument("--epsilon-update", dest="eps_update", type=float, default=0.001)
     arg_parser.add_argument("--epsilon-lb", dest="eps_lb", type=float, default=0.0001)
-    arg_parser.add_argument("--delta", dest="delta", type=float, default=0.5)
+    arg_parser.add_argument("--delta", dest="delta", type=float, default=0.95)
     arg_parser.add_argument("--epochs", dest="epochs", type=int, default=100000)
     arg_parser.add_argument("--learning", dest="learning", type=float, default=1e-5)
     name_space_obj = arg_parser.parse_args()
