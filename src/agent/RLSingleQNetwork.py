@@ -43,6 +43,18 @@ class DebugCallback(callbacks.Callback):
         print("Epsilon area entered ...")
         print(f"Actual index : {tmp} -- Exploration index : {q_value_index}")
 
+class CheckpointCallback(callbacks.Callback):
+
+    def __init__(self, checkpoint_when=100000):
+        super().__init__()
+        self.checkpoint_on_epoch = checkpoint_when
+
+    def on_epoch_end(self, epoch, logs=None):
+        model = logs["rl_model"]
+        if(epoch % self.checkpoint_on_epoch == 0):
+            print("Checkpoint reached -- storing weights ...")
+            model.model_checkpointing()
+
 class TrainCallback(callbacks.Callback):
 
     def __init__(self, log_training_in_epochs=50, log_debug_training_in_epochs=100):
@@ -82,6 +94,10 @@ class TrainCallback(callbacks.Callback):
             file.write(f"Mean Q-Target = {mean_q_target_value}\n")
             file.write(f"Mean Reward   = {reward_metric.result()}\n")
         
+    def on_train_end(self, logs=None):
+        with open("tmp/model_parameters.info", 'w') as file:
+            pass
+
 class History():
     
     def __init__(self, ) -> None:
@@ -101,7 +117,6 @@ class History():
         hist_ = 0
         if ('all' not in args) and ('loss' not in args) and ('q_value' not in args) and \
             ('q*_value' not in args):
-            print(args)
             return None
         
         if('all' in args):
@@ -117,34 +132,36 @@ class History():
 
         return hist_
 
+@keras.saving.register_keras_serializable(name="RL-Q-Network")
 class RLSingleQNetwork(keras.Model): 
 
     def __init__(self, rl_environment, fixed_reduce_value=100):
         super().__init__()
         self.rl_environment = rl_environment
         self.fixed_reduce_value = fixed_reduce_value
+        self.ckpt_reached       = 0
         self.handling_callbacks = callbacks.CallbackList()
         
         print("environment shape : ", self.rl_environment.get_env_shape())
         print("buttons supported : ", self.rl_environment.count_buttons_supported())
         print("buttons defined   : ", self.rl_environment.def_buttons())
-        self.conv_layer1   = layers.Conv2D(filters=16, kernel_size=(4,4), activation="relu", \
-            strides=(2,2), padding='same', input_shape=self.rl_environment.get_env_shape(), use_bias=False)
-        self.pool_layer1   = layers.MaxPooling2D(pool_size=(2,2), padding='same')
-        self.conv_layer2   = layers.Conv2D(32, (4,4), (2,2), activation="relu", use_bias=False, padding='same')
-        self.pool_layer2   = layers.MaxPooling2D(pool_size=(2,2), padding='same')
-        self.conv_layer3   = layers.Conv2D(64, (3,3), (2,2), activation="relu", use_bias=False, padding='same')
+        self.conv_layer1   = layers.Conv2D(16, (6,6), activation="relu",
+            input_shape=self.rl_environment.get_env_shape(), use_bias=False)
+        self.pool_layer1   = layers.MaxPooling2D(pool_size=(3,3), padding='same')
+        self.conv_layer2   = layers.Conv2D(32, (5,5), activation="relu", use_bias=False)
+        self.pool_layer2   = layers.MaxPooling2D(pool_size=(3,3), padding='same')
+        self.conv_layer3   = layers.Conv2D(64, (4,4), activation="relu", use_bias=False)
         self.pool_layer3   = layers.MaxPooling2D(pool_size=(2,2), padding='same')
-        self.conv_layer4   = layers.Conv2D(128, (2,2), activation="relu", use_bias=False, padding='same')
+        self.conv_layer4   = layers.Conv2D(128, (3,3), activation="relu", use_bias=False)
         self.pool_layer4   = layers.MaxPooling2D(pool_size=(2,2), padding='same')
-        """self.conv_layer5   = layers.Conv2D(128, (2,2), activation="relu") 
-        self.pool_layer5   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2))
-        self.conv_layer6   = layers.Conv2D(256, (3,3), activation="relu")
-        self.pool_layer6   = layers.MaxPooling2D(pool_size=(2,2), strides=(2,2)) """
-        self.flatten_layer  = layers.Flatten()
-        self.dense_layer1   = layers.Dense(64)
-        self.leaky_relu     = layers.LeakyReLU()
-        self.dense_layer2   = layers.Dense(self.rl_environment.count_buttons_supported())
+        self.conv_layer5   = layers.Conv2D(256, (2,2), activation="relu", use_bias=False) 
+        self.pool_layer5   = layers.MaxPooling2D(pool_size=(2,2), padding='same')
+        self.flatten_layer = layers.Flatten()
+        self.dense_layer1  = layers.Dense(256)
+        self.leaky_relu1   = layers.LeakyReLU()
+        self.dense_layer2  = layers.Dense(128)
+        self.leaky_relu2   = layers.LeakyReLU()
+        self.dense_layer3  = layers.Dense(self.rl_environment.count_buttons_supported())
 
     def call(self, game_state):
         x = self.conv_layer1(game_state)
@@ -155,14 +172,14 @@ class RLSingleQNetwork(keras.Model):
         x = self.pool_layer3(x)
         x = self.conv_layer4(x)
         x = self.pool_layer4(x)
-        """x = self.conv_layer5(x)
+        x = self.conv_layer5(x)
         x = self.pool_layer5(x)
-        x = self.conv_layer6(x)
-        x = self.pool_layer6(x) """
         x = self.flatten_layer(x)
         x = self.dense_layer1(x)
-        x = self.leaky_relu(x)
+        x = self.leaky_relu1(x)
         x = self.dense_layer2(x)
+        x = self.leaky_relu2(x)
+        x = self.dense_layer3(x)
         return x
 
     def reduce_over_time(self, epoch, epsilon, epsilon_update, epsilon_l_b, reduce_update):
@@ -197,10 +214,7 @@ class RLSingleQNetwork(keras.Model):
         actions = tf.one_hot(q_value_index, depth=self.rl_environment.count_buttons_supported(), dtype=tf.int32)
         reward = self.rl_environment.perform_action(actions.numpy())
         updated_game_state = self.rl_environment.get_game_state()
-        reshaped_screen_buffer = tf.convert_to_tensor(np.asarray(updated_game_state.screen_buffer) \
-            .astype(np.float32).reshape(self.rl_environment.get_env_shape()))
-        reshaped_screen_buffer = (reshaped_screen_buffer - 127.5) / 127.5 # [-1 , 1]
-        reshaped_screen_buffer = tf.expand_dims(reshaped_screen_buffer, axis=0)
+        reshaped_screen_buffer = self.to_data_buffer(updated_game_state)
         q_star_values = self(reshaped_screen_buffer)
         q_star_value = tf.reduce_max(q_star_values[0])
 
@@ -232,17 +246,27 @@ class RLSingleQNetwork(keras.Model):
     def to_data_buffer(self, game_state):
         a = np.asarray(game_state.screen_buffer) \
             .astype(np.float32).reshape(self.rl_environment.get_env_shape())
+        a = self.normalize_image(a)
         return tf.expand_dims(a, axis=0)
+
+    def normalize_image(self, reshaped_screen_buffer): # [-1, 1]
+        return (reshaped_screen_buffer - 127.5) / 127.5
 
     def register_callback(self, callback: callbacks.Callback):
         self.handling_callbacks.append(callback)
+
+    def model_checkpointing(self):
+        print(f"Writing weights to ckpt_{self.ckpt_reached+1}.weights.h5")
+        path_str = os.path.join("checkpoints", f"ckpt_{self.ckpt_reached+1}.weights.h5")
+        self.save_weights(path_str, overwrite=True)
+        self.ckpt_reached += 1
 
     """
     reduce_fctn : over_time or fixed
     reduce_update : over_time -> update value , fixed -> fixed value to stop
     """
     def fit(self, *args, epochs=1, delta=0.95, epsilon=0.1, epsilon_update=0.001, 
-            epsilon_l_b=0.0001, reduce_update=100, reduce_fctn="over_time"):
+            epsilon_l_b=0.0001, reduce_update=1000, reduce_fctn="over_time"):
         rnd_seed = uniform.rvs()
         reduce_function = None
         limit_reached = False
@@ -256,13 +280,16 @@ class RLSingleQNetwork(keras.Model):
             
         history = History()
         self.register_callback(TrainCallback())
+        self.register_callback(CheckpointCallback())
         self.log_parameters_used(epochs, delta, epsilon, epsilon_update,
             epsilon_l_b, reduce_update, reduce_function, 0)
+
+        self.handling_callbacks.on_train_begin()
 
         for epoch in range(epochs):
             game_state = self.rl_environment.get_game_state()
             reshaped_screen_buffer = self.to_data_buffer(game_state)
-            reward, q_value, q_star_value, loss, action = self.train_step(
+            reward, q_value, q_star_value, loss, _ = self.train_step(
                 reshaped_screen_buffer, rnd_seed, delta, epsilon, *args)
             self.metrics[0].update_state(reward)
             if(not limit_reached):
@@ -271,7 +298,8 @@ class RLSingleQNetwork(keras.Model):
             history.update_history((q_value, q_star_value, loss))
                 
             self.handling_callbacks.on_epoch_end(epoch+1, {"hist":history, "metric":self.metrics[0],
-                "loss":loss, "q*_value":q_star_value, "q_value":q_value})
+                "loss":loss, "q*_value":q_star_value, "q_value":q_value, "rl_model":self})
+        #self.handling_callbacks.on_train_end()
         self.rl_environment.close_env()
 
     def log_parameters_used(self, epochs, delta, epsilon, epsilon_update,
@@ -297,6 +325,45 @@ class RLSingleQNetwork(keras.Model):
 
     def evaluate(self, x=None, y=None, batch_size=None, verbose="auto", sample_weight=None, steps=None, callbacks=None, max_queue_size=10, workers=1, use_multiprocessing=False, return_dict=False, **kwargs):
         return super().evaluate(x, y, batch_size, verbose, sample_weight, steps, callbacks, max_queue_size, workers, use_multiprocessing, return_dict, **kwargs)
+
+    def predict(self, game_state):
+        data   = self.to_data_buffer(game_state)
+        return self(data)
+    
+    def get_model_layers(self):
+        return {
+            "conv_layer_1" : self.conv_layer1,
+            "conv_layer_2" : self.conv_layer2,
+            "conv_layer_3" : self.conv_layer3,
+            "conv_layer_4" : self.conv_layer4,
+            "conv_layer_5" : self.conv_layer5,
+            "pool_layer_1" : self.pool_layer1,
+            "pool_layer_2" : self.pool_layer2,
+            "pool_layer_3" : self.pool_layer3,
+            "pool_layer_4" : self.pool_layer4,
+            "pool_layer_5" : self.pool_layer5,
+            "flattern_flayer" : self.flatten_layer,
+            "dense_layer_1" : self.dense_layer1,
+            "dense_layer_2" : self.dense_layer2,
+            "dense_layer_3" : self.dense_layer3,
+            "leaky_relu_1" : self.leaky_relu1,
+            "leaky_relu_2" : self.leaky_relu2 
+        }
+
+    def get_config(self):
+        base_configuration   = super().get_config()
+        rl_env_serialization = self.rl_environment.get_config()
+        architecture_configuration = {
+            "rl_environment" : rl_env_serialization,
+            "fixed_reduce_value" : self.fixed_reduce_value
+        } 
+        return {**base_configuration, **architecture_configuration}
+
+    @classmethod
+    def from_config(cls, config):
+        rl_environment = RL_Env.RL_Env.from_config(config.pop("rl_environment"))
+        fixed_value   = config.pop("fixed_reduce_value")
+        return cls(rl_environment, fixed_value)
 
 def create_log():
     if not os.path.exists(os.path.join(os.getcwd(), "logs", "run.log")):
@@ -328,13 +395,35 @@ def train_model_routine(debug_act: bool, config : str, res : tuple[int, int],
     print("model weigths location : ", model_loc)
     model.save(model_loc)
 
-def load_model_routine():
-    pass
+def load_model_routine(dir : str, file : str,  inference_c : int,
+        epochs, delta, eps, eps_update, eps_lb, inference_include_restart : bool, 
+        inference : bool, checkpoint : int):
+    
+    if(inference):
+        files_in_dir = os.listdir("checkpoints")
+        if(checkpoint < len(files_in_dir)):
+            raise Exception(f"Checkpoint is not in valid range - Expected range : [1,{files_in_dir}]"
+                            f"But received {checkpoint}\n")
+        model = keras.models.load_weights(os.path.join("checkpoint", f"ckpt_{checkpoint}.weights.h5"))
+        for inf_i in range(inference_c):
+            if(not inference_include_restart and model.rl_environment.is_episode_finished()):
+                break
+            game_state = model.rl_environment.get_game_state()
+            action = model.predict(game_state)
+            reward = model.rl_environment.perform_action(action)
+            print(f"Inference's {inf_i} reward : {reward}")
+        return
 
+    model_loc = os.path.join(dir, file)
+    model = keras.models.load_model(model_loc)
+
+    model.fit(epochs=epochs, delta=delta, epsilon=eps, epsilon_update=eps_update,
+                epsilon_l_b=eps_lb)
+    
 def parse_arguments():
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument("-l", "--load-weights", help='load trained weights', 
-        dest="load_weights", action='store_true')
+    arg_parser.add_argument("-l", "--load-model", help='load model (arch, weights, state)', 
+        dest="load_model", action='store_true')
     arg_parser.add_argument("--version", action='version', version='1.0')
     arg_parser.add_argument("-d", "--debug", help='prints debug messages while training',
         dest="debug", action='store_true')
@@ -342,9 +431,9 @@ def parse_arguments():
         default="deadly_corridor.cfg", metavar='CNF')
     arg_parser.add_argument("-t", "--train", help='specifies if train should occur',
         action='store_true', dest='trainable')
-    arg_parser.add_argument("-x", "--resX", help='resolution x (rows)',
-        dest="res", action='append', type=int)
     arg_parser.add_argument("-y", "--resY", help='resolution y (cols)',
+        dest="res", action='append', type=int)
+    arg_parser.add_argument("-x", "--resX", help='resolution x (rows)',
         dest="res", action='append', type=int)
     arg_parser.add_argument("--out-dir", default=".", help='specifiy output directory',
         dest="dir")
@@ -355,14 +444,21 @@ def parse_arguments():
     arg_parser.add_argument("--epsilon-update", dest="eps_update", type=float, default=0.001)
     arg_parser.add_argument("--epsilon-lb", dest="eps_lb", type=float, default=0.0001)
     arg_parser.add_argument("--delta", dest="delta", type=float, default=0.95)
-    arg_parser.add_argument("--epochs", dest="epochs", type=int, default=100000)
+    arg_parser.add_argument("--epochs", dest="epochs", type=int, default=500000)
     arg_parser.add_argument("--learning", dest="learning", type=float, default=1e-5)
+    arg_parser.add_argument("--inf", dest="inference", action="store_true")
+    arg_parser.add_argument("--inf-count", dest="inference_count", type=int, default=1000)
+    arg_parser.add_argument("--inf-include-restart", dest="inference_restart_ok", default=True)
+    arg_parser.add_argument("--ckpt", dest="checkpoint", type=int, default=1)
     name_space_obj = arg_parser.parse_args()
     
     var_dict = vars(name_space_obj)
     
-    if (var_dict["load_weights"]):
-        load_model_routine()
+    if (var_dict["load_model"]):
+        load_model_routine(var_dict["dir"], var_dict["file"], var_dict["inference_count"],
+            var_dict["epochs"], var_dict["delta"], var_dict["eps"], var_dict["eps_update"],
+            var_dict["eps_lb"], var_dict["inference_restart_ok"], var_dict["inference"],
+            var_dict["checkpoint"])
     elif(var_dict["trainable"]):    
         train_model_routine(var_dict["debug"], var_dict["configuration"], tuple(var_dict["res"]),
             var_dict["dir"], var_dict["file"], var_dict["epochs"],
