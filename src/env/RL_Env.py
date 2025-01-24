@@ -5,7 +5,8 @@ from time import sleep
 
 class RL_Env:
    
-  def __init__(self, cfg : str, res : tuple[int, int]=(240, 320)):
+  def __init__(self, cfg : str, res : tuple[int, int]=(240, 320), 
+               start_game=True):
     self.game = game = vzd.DoomGame()
     no_errors_while_configuring = game.load_config(os.path.join(
       vzd.scenarios_path, cfg)) # or any other scenario file
@@ -20,7 +21,9 @@ class RL_Env:
       raise Exception("resolution not supported ...")
 
     self.buttons_supported = game.get_available_buttons()
-    game.init()
+    if start_game:
+      self.init_state = True
+      game.init()
 
   def count_buttons_supported(self):
     return len(self.buttons_supported)
@@ -29,10 +32,11 @@ class RL_Env:
     return [(e.name, e.value) for e in self.buttons_supported]
 
   def get_game_state(self):
-    if self.game.is_episode_finished():
-        self.game.new_episode()
     return self.game.get_state()
-   
+
+  def start_new_episode(self):
+    self.game.new_episode()
+
   def get_episode_time(self):
     return self.game.get_episode_time()
    
@@ -40,8 +44,6 @@ class RL_Env:
     return self.game.is_episode_finished()
 
   def perform_action(self, action):
-    if self.game.is_episode_finished():
-        self.game.new_episode()
     return self.game.make_action(action) # return reward
    
   def get_env_shape(self):
@@ -60,6 +62,7 @@ class RL_Env:
     x, y, *_ = self.get_env_shape()
     return {
       "cfg" : self.configuration,
+      "init_state" : False if not hasattr(self, 'init_state') else True,
       "res" : (x, y)
   }
 
@@ -67,26 +70,5 @@ class RL_Env:
   def from_config(cls, config):
     config_str = config.pop("cfg")
     resolution = config.pop("res")
-    return cls(config_str, resolution)
-
-"""actions = [[True, True, True, True, True, True, True], [True, True, True, True, True, True, False], [True, True, True, False, True, True, True],
-           [False, True, False, True, True, False, False], [True, False, True, False, True, True, False], [False, False, True, True, True, True, True], 
-           [True, True, True, True, True, True, False]]
-
-import gymnasium as gym
-from vizdoom import gymnasium_wrapper # This import will register all the environments
-
-env = gym.make("VizdoomCorridor-v0", render_mode="human") # or any other environment id
-observation, infos = env.reset()
-
-print("", env.action_space, env.observation_space)
-
-for __ in range(1000):
-    action = env.action_space.sample()  # agent policy that uses the observation and info
-    print("action : ", action)
-    observation, reward, terminated, truncated, info = env.step(action)
-
-    if terminated or truncated:
-        observation, info = env.reset()
-
-env.close() """
+    start_game = config.pop("init_state")
+    return cls(config_str, resolution, start_game)
