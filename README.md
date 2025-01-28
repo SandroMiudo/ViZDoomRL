@@ -41,13 +41,15 @@ To gather the options which are available just exec with `-h`.
 A basic run, in which the epsilon parameters and the learning rate is set manunally would look like this : 
 
 ```shell
-python3 -m src.agent.RLSingleQNetwork --epsilon 0.05 --epsilon-update 0.0001 --learning 1e-7
+python3 -m src.agent.RLSingleQNetwork --train --resX 240 --resY 320\
+--epsilon 0.05 --epsilon-update 0.0001 --learning 1e-7
 ```
 
 A basic run, in which only the delta parameter should be modified would look something like this :
 
 ```shell
-python3 -m src.agent.RLSingleQNetwork --delta 0.95
+python3 -m src.agent.RLSingleQNetwork --train --resX 240 --resY 320\
+--delta 0.95 --learning 1e-7
 ```
 
 [1]: https://vizdoom.farama.org/ "vizdoom"
