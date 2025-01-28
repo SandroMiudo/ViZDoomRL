@@ -433,7 +433,8 @@ class QNetwork(keras.Model):
             "replay_limit" : self.replay_limit,
             "mini_batch" : self.mini_batch,
             "recurse" : False,
-            "target_reset" : self.target_reset
+            "target_reset" : self.target_reset,
+            "warm_up" : self.warm_up_runs
         } 
         return {**base_configuration, **architecture_configuration}
 
@@ -445,11 +446,12 @@ class QNetwork(keras.Model):
         mini_batch    = config.pop("mini_batch")
         recurse       = config.pop("recurse")
         target_reset  = config.pop("target_reset")
+        warm_up       = config.pop("warm_up")
 
         return cls(rl_environment, fixed_value, recurse=recurse, 
                    replay_limit=replay_limit, 
                    mini_batch=mini_batch,
-                   target_reset=target_reset)
+                   target_reset=target_reset, warm_up=warm_up)
 
 def create_log():
     if not os.path.exists(os.path.join(os.getcwd(), "logs", "run.log")):
@@ -465,10 +467,10 @@ def create_log():
 
 def train_model_routine(debug_act: bool, config : str, res : tuple[int, int],
     dir : str, file: str, epochs, delta, eps, eps_update, eps_lb, learning,
-    buffer_limit : int, target_reset : int, mini_batch : int):
+    buffer_limit : int, target_reset : int, mini_batch : int, warm_up : int):
     rl_env = RL_Env.RL_Env(config, res)    
     model = QNetwork(rl_env, replay_limit=buffer_limit, mini_batch=mini_batch,
-                     target_reset=target_reset)
+                     target_reset=target_reset, warm_up=warm_up)
     model.compile(optimizer=optimizers.Adam(learning_rate=learning),
               loss=losses.MeanSquaredError(),
               metrics=[metrics.Mean()])
@@ -533,6 +535,8 @@ def parse_arguments():
                             'before updating q target', dest="target_reset", type=int)
     arg_parser.add_argument("--mini-batch", default="32", help='specify mini batch size to'\
                             'sample from replay buffer', dest="mini_batch", type=int)
+    arg_parser.add_argument("--warm-up", default="100", help='specify the warm up routine duration'
+                            , dest="warm_up", type=int)
     arg_parser.add_argument("--epsilon", help="exploration radius : x -> 0 -- less exploration"
                             "x -> 1 -- more exploration", dest="eps", type=float, default=0.08)
     arg_parser.add_argument("--epsilon-update", dest="eps_update", type=float, default=0.001)
@@ -558,7 +562,7 @@ def parse_arguments():
             var_dict["dir"], var_dict["file"], var_dict["epochs"],
             var_dict["delta"], var_dict["eps"], var_dict["eps_update"],
             var_dict["eps_lb"], var_dict["learning"], var_dict["buffer_limit"],
-            var_dict["target_reset"], var_dict["mini_batch"])
+            var_dict["target_reset"], var_dict["mini_batch"], var_dict["warm_up"])
 
 if __name__ == "__main__":
    parse_arguments()
