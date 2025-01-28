@@ -14,7 +14,6 @@ import numpy as np
 from ..env import RL_Env
 import matplotlib.pyplot as plt
 from scipy.stats import uniform
-import time
 import argparse
 import os
 
@@ -106,16 +105,18 @@ class History():
         return hist_
 
 class QTargetNetwork(keras.Model):
-    def __init__(self, model:keras.Model):
+    def __init__(self, model:keras.Model, rho=0.1):
         super().__init__()
         model_config = model.get_config()
         model_config["recurse"] = True
         model_config["rl_environment"]["init_state"] = False
         self.net = model.__class__.from_config(model_config)
         self.net.trainable = False
+        self.rho = rho
 
     def set_weights(self, weights):
-        self.net.set_weights(weights)
+        # soft updates, instead of hard updates
+        self.net.set_weights([self.rho*w2+(1-self.rho)*w1 for w1,w2 in zip(self.net.get_weights(), weights)])
 
     def call(self, x):
         return self.net(x)
@@ -123,7 +124,8 @@ class QTargetNetwork(keras.Model):
 @keras.saving.register_keras_serializable(name="Q-Network")
 class QNetwork(keras.Model): 
     def __init__(self, rl_environment, fixed_reduce_value=2, *, 
-                 recurse=False, replay_limit=1024, mini_batch=32, target_reset=1000):
+                 recurse=False, replay_limit=1024, mini_batch=32, target_reset=1000,
+                 warm_up=500):
         super().__init__()
 
         self.rl_environment     = rl_environment
@@ -134,6 +136,7 @@ class QNetwork(keras.Model):
             self.replay_idx    = 0
             self.replay_etry_m = 0
             self.replay_limit  = replay_limit
+            self.warm_up_runs  = warm_up
             self.state_buffer  = tf.Variable(
                 tf.zeros([self.replay_limit, *self.rl_environment.get_env_shape()]), 
                 trainable=False)
@@ -157,22 +160,27 @@ class QNetwork(keras.Model):
             print("Cloning model ...")
 
         self.model = keras.models.Sequential([
-            layers.Conv2D(64, (7,7), strides=(2,2), activation="relu",
+            layers.Conv2D(64, (7,7), strides=(2,2),
                 use_bias=False, padding='same'),
             layers.BatchNormalization(),
-            layers.MaxPool2D((5,5), (2,2)),
-            layers.Conv2D(64, (5,5), strides=(2,2), activation="relu",
+            layers.ReLU(),
+            layers.MaxPool2D((4,4), (2,2)),
+            layers.Conv2D(64, (4,4), strides=(2,2),
                 use_bias=False, padding='same'),
             layers.BatchNormalization(),
-            layers.Conv2D(128, (5,5), strides=(2,2), activation="relu", 
+            layers.ReLU(),
+            layers.Conv2D(128, (4,4), strides=(2,2), 
                 use_bias=False, padding='same'),
             layers.BatchNormalization(),
-            layers.Conv2D(256, (5,5), strides=(2,2), activation="relu", 
+            layers.ReLU(),
+            layers.Conv2D(256, (4,4), strides=(2,2), 
                 use_bias=False, padding='same'),
             layers.BatchNormalization(),
-            layers.Conv2D(512, (5,5), strides=(2,2), activation="relu", 
+            layers.ReLU(),
+            layers.Conv2D(512, (4,4), strides=(2,2), 
                 use_bias=False, padding='same'),
             layers.BatchNormalization(),
+            layers.ReLU(),
             layers.Flatten(),
             layers.Dense(self.rl_environment.count_buttons_supported())
         ])
@@ -232,12 +240,10 @@ class QNetwork(keras.Model):
         q_value_index = tf.argmax(q_values[0])
         rnd_uniform = uniform.rvs()
         if(rnd_uniform < epsilon):    
-            tmp = q_value_index
             q_value_index = tf.random.uniform(
                 shape=[],
                 maxval=self.rl_environment.count_buttons_supported(), 
                 dtype=tf.int32)
-            #self.handling_callbacks.on_train_begin({"a_ind":tmp, "exp_ind":q_value_index})
         actions = tf.one_hot(q_value_index, 
                              depth=self.rl_environment.count_buttons_supported(), 
                              dtype=tf.int64)
@@ -246,11 +252,14 @@ class QNetwork(keras.Model):
         if updated_game_state != None:
             reshaped_screen_buffer = self.to_data_buffer(updated_game_state)
         else:
-            reshaped_screen_buffer = tf.ones_like(game_state) # will be set to 0
+            reshaped_screen_buffer = tf.zeros_like(game_state)
 
         self.store_transition(game_state, q_value_index.numpy(), reward, 
                               reshaped_screen_buffer,
                               self.rl_environment.is_episode_finished())
+
+        if self.replay_etry_m < self.warm_up_runs:
+            return (-1, -1, -1)
 
         transitions_m = self.sample_mini_batch()
 
@@ -261,11 +270,14 @@ class QNetwork(keras.Model):
         y = rewards_m + tf.cast(masked_m, dtype=tf.float32) * (delta * qtarget)
 
         with tf.GradientTape() as gradient_tape:
+            gradient_tape.watch(y)
             qvalue_approx = self(states_m)
             v = tf.gather(qvalue_approx, actions_m, axis=1, batch_dims=1)
             loss = tf.reduce_mean(tf.square(y - v))
 
         gradients = gradient_tape.gradient(loss, self.trainable_weights)
+        gradients = [tf.clip_by_value(gradient, -10, 10) for gradient in gradients]
+
         self.optimizer.apply_gradients(zip(gradients, self.trainable_weights))
         return reward, loss.numpy(), q_value_index.numpy()
 
@@ -328,16 +340,25 @@ class QNetwork(keras.Model):
 
         episode_loss_metric = tf.metrics.Mean()
         t = 0
+        warm_up_reached = 0
         for epoch in range(epochs):
             while not self.rl_environment.is_episode_finished():
                 game_state = self.rl_environment.get_game_state()
-                if t == 0:
+                if t == 0 and warm_up_reached:
                     print("Transfering weights to Q target network ...")
                     target_net.set_weights(self.get_weights())
                 reshaped_screen_buffer = self.to_data_buffer(game_state)
-                reward, loss, _ = self.train_step(target_net,
+                reward, loss, _neg_ = self.train_step(target_net,
                     reshaped_screen_buffer, delta, epsilon)
                 
+                if (reward, loss, _neg_) == (-1, -1, -1):
+                    continue
+
+                if not warm_up_reached:
+                    print("Warm up condition met ... Starting training model !")
+                    warm_up_reached = 1
+                    continue
+
                 self.metrics[0].update_state(reward)
                 episode_loss_metric.update_state(loss)
                 t = (t + 1) % self.target_reset
@@ -517,7 +538,7 @@ def parse_arguments():
     arg_parser.add_argument("--epsilon-update", dest="eps_update", type=float, default=0.001)
     arg_parser.add_argument("--epsilon-lb", dest="eps_lb", type=float, default=0.0001)
     arg_parser.add_argument("--delta", dest="delta", type=float, default=0.95)
-    arg_parser.add_argument("--epochs", dest="epochs", type=int, default=500000)
+    arg_parser.add_argument("--epochs", dest="epochs", type=int, default=50)
     arg_parser.add_argument("--learning", dest="learning", type=float, default=1e-5)
     arg_parser.add_argument("--inf", dest="inference", action="store_true")
     arg_parser.add_argument("--inf-count", dest="inference_count", type=int, default=1000)
